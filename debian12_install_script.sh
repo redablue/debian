@@ -60,16 +60,29 @@ check_root_privileges() {
     fi
 }
 
-# Vérification de la version Debian
-check_debian_version() {
-    if ! grep -q "bookworm" /etc/os-release; then
-        print_warning "Ce script est optimisé pour Debian 12 (Bookworm)"
-        read -p "Continuer malgré tout ? (y/N): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
+# Installation et vérification des dépendances système
+check_and_install_prerequisites() {
+    print_status "Vérification et installation des prérequis système..."
+    
+    # Vérification de l'espace disque (minimum 10GB)
+    available_space=$(df /var --output=avail | tail -1)
+    required_space=10485760  # 10GB en KB
+    
+    if [ "$available_space" -lt "$required_space" ]; then
+        print_error "Espace disque insuffisant. Minimum 10GB requis dans /var"
+        exit 1
     fi
+    
+    # Vérification de la mémoire (minimum 1GB)
+    available_memory=$(free -m | awk 'NR==2{print $2}')
+    if [ "$available_memory" -lt 1024 ]; then
+        print_warning "Mémoire limitée détectée (${available_memory}MB). Minimum recommandé: 2GB"
+    fi
+    
+    # Installation des paquets de base essentiels
+    apt install -y software-properties-common apt-transport-https lsb-release ca-certificates
+    
+    print_success "Prérequis système vérifiés"
 }
 
 # Mise à jour du système
@@ -122,13 +135,21 @@ EOF
 install_php() {
     print_status "Installation de PHP ${PHP_VERSION} et des extensions..."
     
-    apt install -y php${PHP_VERSION} php${PHP_VERSION}-fpm php${PHP_VERSION}-cli php${PHP_VERSION}-common \
+    # Mise à jour de la liste des paquets pour PHP
+    apt update
+    
+    # Installation de PHP et des extensions (json est intégrée depuis PHP 8.0)
+    apt install -y php${PHP_VERSION} php${PHP_VERSION}-cli php${PHP_VERSION}-common \
         php${PHP_VERSION}-mysql php${PHP_VERSION}-xml php${PHP_VERSION}-xmlrpc \
         php${PHP_VERSION}-curl php${PHP_VERSION}-gd php${PHP_VERSION}-imagick \
         php${PHP_VERSION}-dev php${PHP_VERSION}-imap php${PHP_VERSION}-mbstring \
         php${PHP_VERSION}-opcache php${PHP_VERSION}-soap php${PHP_VERSION}-zip \
-        php${PHP_VERSION}-intl php${PHP_VERSION}-bcmath php${PHP_VERSION}-json \
+        php${PHP_VERSION}-intl php${PHP_VERSION}-bcmath php${PHP_VERSION}-readline \
+        php${PHP_VERSION}-bz2 php${PHP_VERSION}-sqlite3 php${PHP_VERSION}-tidy \
         libapache2-mod-php${PHP_VERSION}
+    
+    # Vérification que JSON est disponible (intégré dans le noyau PHP)
+    php -m | grep -i json || print_warning "Extension JSON non détectée (mais devrait être intégrée)"
     
     # Configuration PHP pour la production
     cat > /etc/php/${PHP_VERSION}/apache2/conf.d/99-fidaous-pro.ini << EOF
@@ -710,20 +731,43 @@ main() {
     
     print_status "Début de l'installation - $(date)"
     
-    # Étapes d'installation
-    update_system
-    install_apache
-    install_php
-    install_mariadb
-    install_composer
-    install_nodejs
-    setup_database
-    deploy_application
-    configure_virtualhost
-    set_permissions
-    install_php_dependencies
-    setup_cron_jobs
-    configure_firewall
+# Fonction de diagnostic et résolution des problèmes
+troubleshoot_common_issues() {
+    print_status "Diagnostic des problèmes courants..."
+    
+    # Vérification des services actifs
+    systemctl is-active --quiet apache2 || {
+        print_warning "Apache2 n'est pas actif, tentative de redémarrage..."
+        systemctl restart apache2
+    }
+    
+    systemctl is-active --quiet mariadb || {
+        print_warning "MariaDB n'est pas actif, tentative de redémarrage..."
+        systemctl restart mariadb
+    }
+    
+    # Vérification des extensions PHP critiques
+    required_extensions=("mysql" "curl" "gd" "mbstring" "xml" "zip")
+    missing_extensions=()
+    
+    for ext in "${required_extensions[@]}"; do
+        if ! php -m | grep -qi "^$ext$"; then
+            missing_extensions+=("php${PHP_VERSION}-$ext")
+        fi
+    done
+    
+    if [ ${#missing_extensions[@]} -gt 0 ]; then
+        print_warning "Installation des extensions PHP manquantes: ${missing_extensions[*]}"
+        apt install -y "${missing_extensions[@]}" || true
+    fi
+    
+    # Test de connectivité base de données
+    if ! mysql -u root -e "SELECT 1;" &>/dev/null; then
+        print_warning "Problème de connexion à MariaDB détecté"
+    fi
+    
+    print_success "Diagnostic terminé"
+}
     
     # Affichage du résumé
     display_final_summary
